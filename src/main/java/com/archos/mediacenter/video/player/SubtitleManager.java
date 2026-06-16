@@ -53,7 +53,6 @@ import org.slf4j.LoggerFactory;
 import java.lang.ref.WeakReference;
 import java.util.Collections;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -85,6 +84,11 @@ public class SubtitleManager {
     private boolean mOutline = false;
     private boolean mBackground = false;
     private int mBgOpacity = 128;
+    // NOTE: not read anywhere in this class after the Media3 migration. Kept (rather than
+    // deleted) because setUIMode() is a public method some external caller may still invoke;
+    // removing the field would either break that call or require touching call sites outside
+    // this file. If nothing reads this after a full search of the call graph, both the field
+    // and setUIMode() are safe to delete.
     private int mUiMode;
 
     private boolean isFirstTime = true;
@@ -259,6 +263,7 @@ public class SubtitleManager {
 
     private final Handler mHandler = new SubtitleHandler(this);
 
+    @SuppressWarnings("unchecked")
     private void handleMessage(Message msg) {
         switch (msg.what) {
             case MSG_STOP_SUBTITLE:
@@ -273,20 +278,25 @@ public class SubtitleManager {
                         mExoSubtitleView.setCues(Collections.emptyList());
                     } else {
                         ArrayList<Cue> exoCues = new ArrayList<>();
-                        // Track the number of active cues for each screen position
-                        HashMap<SubtitleAlignment, Integer> alignmentCounters = new HashMap<>();
+                        // Track the number of active cues for each screen position.
+                        // Previously a HashMap<SubtitleAlignment, Integer> was allocated on
+                        // every single call to this handler (i.e. on every cue add/expire),
+                        // plus Integer autoboxing per increment. SubtitleAlignment is a fixed
+                        // enum, so a plain int[] indexed by ordinal() does the same job with
+                        // no allocation beyond the array and no boxing at all.
+                        int[] alignmentCounters = new int[SubtitleAlignment.values().length];
 
                         for (Subtitle sub : activeSubs) {
                             if (sub.isText()) {
                                 SubtitleAlignment alignment = getAlignment(sub.getText());
-                                // Get current offset (default to 0)
-                                int currentCount = alignmentCounters.containsKey(alignment) ? alignmentCounters.get(alignment) : 0;
+                                int idx = alignment.ordinal();
+                                int currentCount = alignmentCounters[idx];
 
                                 // Build cue with offset
                                 exoCues.add(mapToExoCue(sub, currentCount));
 
                                 // Increment the counter for the next cue in this position
-                                alignmentCounters.put(alignment, currentCount + 1);
+                                alignmentCounters[idx] = currentCount + 1;
                             } else {
                                 // Bitmaps don't get row stacking
                                 exoCues.add(mapToExoCue(sub, 0));
@@ -384,10 +394,12 @@ public class SubtitleManager {
 
         class ActiveCue {
             Subtitle subtitle;
-            long timeLeft;
+            long expiresAt;
+
             ActiveCue(Subtitle s) {
                 subtitle = s;
-                timeLeft = s.isTimed() ? s.getDuration() : Long.MAX_VALUE;
+                // Use the absolute timestamp fix!
+                expiresAt = s.isTimed() ? android.os.SystemClock.elapsedRealtime() + s.getDuration() : Long.MAX_VALUE;
             }
         }
 
@@ -414,12 +426,20 @@ public class SubtitleManager {
         synchronized void addSubtitle(Subtitle subtitle) {
             mSuspended = false;
 
-            if (!subtitle.isTimed()) {
+            boolean isEmptyClear = (subtitle.getText() == null || subtitle.getText().trim().isEmpty()) && !subtitle.isBitmap();
+
+            if (isEmptyClear) {
                 mActiveCues.clear();
-                if (subtitle.getText() != null || subtitle.isBitmap()) {
-                    mActiveCues.add(new ActiveCue(subtitle));
-                }
             } else {
+                if (!subtitle.isTimed()) {
+                    for (int i = mActiveCues.size() - 1; i >= 0; i--) {
+                        if (mActiveCues.get(i).expiresAt == Long.MAX_VALUE) {
+                            mActiveCues.remove(i);
+                        }
+                    }
+                }
+
+                // Add the new cue with its absolute expiration time
                 mActiveCues.add(new ActiveCue(subtitle));
             }
 
@@ -433,11 +453,29 @@ public class SubtitleManager {
             mSuspended = true;
             mActiveCues.clear();
             updateUI();
+            interrupt();
         }
 
         synchronized void setSuspended(boolean suspended) {
             if (mSuspended == suspended) return;
             mSuspended = suspended;
+            long now = android.os.SystemClock.elapsedRealtime();
+
+            if (suspended) {
+                // We are pausing. Convert absolute expiration time into remaining duration!
+                for (ActiveCue ac : mActiveCues) {
+                    if (ac.expiresAt != Long.MAX_VALUE) {
+                        ac.expiresAt = Math.max(0, ac.expiresAt - now);
+                    }
+                }
+            } else {
+                // We are resuming. Convert remaining duration back into a future absolute expiration time!
+                for (ActiveCue ac : mActiveCues) {
+                    if (ac.expiresAt != Long.MAX_VALUE) {
+                        ac.expiresAt = now + ac.expiresAt;
+                    }
+                }
+            }
             interrupt();
         }
 
@@ -446,45 +484,60 @@ public class SubtitleManager {
         @Override
         public void run() {
             while (mRunning) {
-                long sleepTime = 0;
+                long sleepTime;
 
                 synchronized (this) {
-                    while (mSuspended || mActiveCues.isEmpty()) {
-                        try { wait(); } catch (InterruptedException e) { if (!mRunning) return; }
-                    }
-
-                    sleepTime = Long.MAX_VALUE;
-                    for (ActiveCue ac : mActiveCues) {
-                        if (ac.timeLeft < sleepTime) {
-                            sleepTime = ac.timeLeft;
+                    while (true) {
+                        if (mSuspended) {
+                            try { wait(); } catch (InterruptedException e) { if (!mRunning) return; }
+                            continue;
                         }
-                    }
-                }
 
-                if (sleepTime > 0 && sleepTime != Long.MAX_VALUE) {
-                    long start = System.currentTimeMillis();
-                    try {
-                        sleep(sleepTime);
-                    } catch (InterruptedException e) {
-                        // Woken up
-                    }
-                    long elapsed = System.currentTimeMillis() - start;
+                        long now = android.os.SystemClock.elapsedRealtime();
+                        boolean expiredAny = false;
 
-                    synchronized (this) {
-                        boolean changed = false;
+                        // 1. Expire cues whose absolute time has passed
                         for (int i = mActiveCues.size() - 1; i >= 0; i--) {
                             ActiveCue ac = mActiveCues.get(i);
-                            if (ac.timeLeft != Long.MAX_VALUE) {
-                                ac.timeLeft -= elapsed;
-                                if (ac.timeLeft <= 30) {
-                                    mActiveCues.remove(i);
-                                    changed = true;
-                                }
+                            if (ac.expiresAt != Long.MAX_VALUE && ac.expiresAt <= now) {
+                                mActiveCues.remove(i);
+                                expiredAny = true;
                             }
                         }
 
-                        if (changed) updateUI();
+                        if (expiredAny) updateUI();
+
+                        if (mActiveCues.isEmpty()) {
+                            try { wait(); } catch (InterruptedException e) { if (!mRunning) return; }
+                            continue;
+                        }
+
+                        // 2. Find the closest upcoming absolute expiration
+                        long minExpiresAt = Long.MAX_VALUE;
+                        for (ActiveCue ac : mActiveCues) {
+                            if (ac.expiresAt < minExpiresAt) {
+                                minExpiresAt = ac.expiresAt;
+                            }
+                        }
+
+                        if (minExpiresAt == Long.MAX_VALUE) {
+                            try { wait(); } catch (InterruptedException e) { if (!mRunning) return; }
+                            continue;
+                        }
+
+                        // 3. Calculate exactly how long to sleep from right now
+                        sleepTime = minExpiresAt - now;
+                        if (sleepTime <= 0) continue; // Safety catch: if it expired while we were doing math, loop again
+                        break;
                     }
+                }
+
+                // 4. Sleep until the next absolute timestamp
+                try {
+                    sleep(sleepTime);
+                } catch (InterruptedException e) {
+                    // Woken up by a new subtitle arriving or pause state changing.
+                    // The loop will seamlessly recalculate `now` and sleep for the correct remaining time!
                 }
             }
         }
@@ -632,8 +685,10 @@ public class SubtitleManager {
 
     public void onSeekStart(int pos) {
         if (mDispSubtitleThread != null) {
+            // interrupt() is now performed atomically inside clear() itself — see
+            // DispSubtitleThread.clear() — so it no longer needs to be called separately
+            // here, which removed a race window against a concurrent addSubtitle().
             mDispSubtitleThread.clear();
-            mDispSubtitleThread.interrupt();
         }
     }
 }
