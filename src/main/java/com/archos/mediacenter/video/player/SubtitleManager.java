@@ -227,6 +227,14 @@ public class SubtitleManager {
         }
         return builder.build();
     }
+    public static class SubtitleWithOffset {
+        public final Subtitle subtitle;
+        public final int stackOffset;
+        public SubtitleWithOffset(Subtitle subtitle, int stackOffset) {
+            this.subtitle = subtitle;
+            this.stackOffset = stackOffset;
+        }
+    }
 
     // -------------------------------------------------------------
     // DELEGATION: Mapping old styling methods to ExoPlayer
@@ -273,30 +281,17 @@ public class SubtitleManager {
                 break;
             case MSG_UPDATE_SUBTITLES:
                 if (mExoSubtitleView != null) {
-                    ArrayList<Subtitle> activeSubs = (ArrayList<Subtitle>) msg.obj;
+                    ArrayList<SubtitleWithOffset> activeSubs = (ArrayList<SubtitleWithOffset>) msg.obj;
                     if (activeSubs == null || activeSubs.isEmpty()) {
                         mExoSubtitleView.setCues(Collections.emptyList());
                     } else {
                         ArrayList<Cue> exoCues = new ArrayList<>();
-                        // Track the number of active cues for each screen position.
-                        // Previously a HashMap<SubtitleAlignment, Integer> was allocated on
-                        // every single call to this handler (i.e. on every cue add/expire),
-                        // plus Integer autoboxing per increment. SubtitleAlignment is a fixed
-                        // enum, so a plain int[] indexed by ordinal() does the same job with
-                        // no allocation beyond the array and no boxing at all.
-                        int[] alignmentCounters = new int[SubtitleAlignment.values().length];
 
-                        for (Subtitle sub : activeSubs) {
+                        for (SubtitleWithOffset subWithOffset : activeSubs) {
+                            Subtitle sub = subWithOffset.subtitle;
                             if (sub.isText()) {
-                                SubtitleAlignment alignment = getAlignment(sub.getText());
-                                int idx = alignment.ordinal();
-                                int currentCount = alignmentCounters[idx];
-
-                                // Build cue with offset
-                                exoCues.add(mapToExoCue(sub, currentCount));
-
-                                // Increment the counter for the next cue in this position
-                                alignmentCounters[idx] = currentCount + 1;
+                                // Build cue using its locked-in persistent offset row
+                                exoCues.add(mapToExoCue(sub, subWithOffset.stackOffset));
                             } else {
                                 // Bitmaps don't get row stacking
                                 exoCues.add(mapToExoCue(sub, 0));
@@ -395,11 +390,12 @@ public class SubtitleManager {
         class ActiveCue {
             Subtitle subtitle;
             long expiresAt;
+            int stackOffset; // <-- NEW: Persistently stores the slot
 
-            ActiveCue(Subtitle s) {
+            ActiveCue(Subtitle s, int offset) {
                 subtitle = s;
-                // Use the absolute timestamp fix!
                 expiresAt = s.isTimed() ? android.os.SystemClock.elapsedRealtime() + s.getDuration() : Long.MAX_VALUE;
+                stackOffset = offset;
             }
         }
 
@@ -413,10 +409,10 @@ public class SubtitleManager {
         }
 
         private void updateUI() {
-            ArrayList<Subtitle> subsToDisplay = new ArrayList<>();
+            ArrayList<SubtitleWithOffset> subsToDisplay = new ArrayList<>();
             synchronized (this) {
                 for (ActiveCue ac : mActiveCues) {
-                    subsToDisplay.add(ac.subtitle);
+                    subsToDisplay.add(new SubtitleWithOffset(ac.subtitle, ac.stackOffset));
                 }
             }
             mHandler.removeMessages(MSG_UPDATE_SUBTITLES);
@@ -437,10 +433,35 @@ public class SubtitleManager {
                             mActiveCues.remove(i);
                         }
                     }
-                }
+                    if (subtitle.getText() != null || subtitle.isBitmap()) {
+                        mActiveCues.add(new ActiveCue(subtitle, 0)); // Non-timed get base slot
+                    }
+                } else {
+                    // Find the lowest unoccupied slot for this exact alignment
+                    int assignedOffset = 0;
+                    if (subtitle.isText()) {
+                        SubtitleAlignment alignment = getAlignment(subtitle.getText());
+                        boolean[] takenSlots = new boolean[16]; // Safely tracks up to 16 overlapping cues
 
-                // Add the new cue with its absolute expiration time
-                mActiveCues.add(new ActiveCue(subtitle));
+                        for (ActiveCue ac : mActiveCues) {
+                            if (ac.subtitle.isText() && getAlignment(ac.subtitle.getText()) == alignment) {
+                                if (ac.stackOffset >= 0 && ac.stackOffset < takenSlots.length) {
+                                    takenSlots[ac.stackOffset] = true; // Mark slot as taken
+                                }
+                            }
+                        }
+
+                        // Grab the first available empty slot
+                        for (int i = 0; i < takenSlots.length; i++) {
+                            if (!takenSlots[i]) {
+                                assignedOffset = i;
+                                break;
+                            }
+                        }
+                    }
+                    // Lock it in!
+                    mActiveCues.add(new ActiveCue(subtitle, assignedOffset));
+                }
             }
 
             updateUI();
