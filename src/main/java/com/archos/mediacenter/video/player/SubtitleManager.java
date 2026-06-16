@@ -53,6 +53,7 @@ import org.slf4j.LoggerFactory;
 import java.lang.ref.WeakReference;
 import java.util.Collections;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -131,81 +132,83 @@ public class SubtitleManager {
     }
 
     /**
-     * Converts Nova's internal Subtitle object into a Media3/ExoPlayer Cue.
-     */
-    private Cue mapToExoCue(com.archos.medialib.Subtitle subtitle) {
+    * Converts Nova's internal Subtitle object into a Media3/ExoPlayer Cue,
+    * using Row Stacking (LINE_TYPE_NUMBER) to prevent overlap.
+    */
+    private Cue mapToExoCue(com.archos.medialib.Subtitle subtitle, int stackOffset) {
         Cue.Builder builder = new Cue.Builder();
 
         if (subtitle.isText()) {
-                    SpannableStringBuilder ssb = new SpannableStringBuilder(
-                        HtmlCompat.fromHtml(cleanText(subtitle.getText()), HtmlCompat.FROM_HTML_MODE_LEGACY)
-                    );
-                    builder.setText(ssb);
+            SpannableStringBuilder ssb = new SpannableStringBuilder(
+                HtmlCompat.fromHtml(cleanText(subtitle.getText()), HtmlCompat.FROM_HTML_MODE_LEGACY)
+            );
+            builder.setText(ssb);
 
-                    // Parse embedded SSA/SRT alignment tags
-                    SubtitleAlignment alignment = getAlignment(subtitle.getText());
+            SubtitleAlignment alignment = getAlignment(subtitle.getText());
 
-                    float line = 0.95f; // Default near bottom
-                    @Cue.AnchorType int lineAnchor = Cue.ANCHOR_TYPE_END;
-                    float position = 0.5f; // Default center
-                    @Cue.AnchorType int positionAnchor = Cue.ANCHOR_TYPE_MIDDLE;
-                    Layout.Alignment textAlignment = Layout.Alignment.ALIGN_CENTER;
+            float line;
+            @Cue.LineType int lineType = Cue.LINE_TYPE_NUMBER; // Row Stacking Mode!
+            @Cue.AnchorType int lineAnchor;
+            float position = 0.5f;
+            @Cue.AnchorType int positionAnchor = Cue.ANCHOR_TYPE_MIDDLE;
+            Layout.Alignment textAlignment = Layout.Alignment.ALIGN_CENTER;
 
-                    // Map alignment to ExoPlayer anchors accurately
-                    switch (alignment) {
-                        case TOP_LEFT:
-                            line = 0.05f; lineAnchor = Cue.ANCHOR_TYPE_START;
-                            position = 0.05f; positionAnchor = Cue.ANCHOR_TYPE_START;
-                            textAlignment = Layout.Alignment.ALIGN_NORMAL; // Left justify
-                            break;
-                        case TOP_MID:
-                            line = 0.05f; lineAnchor = Cue.ANCHOR_TYPE_START;
-                            position = 0.5f; positionAnchor = Cue.ANCHOR_TYPE_MIDDLE;
-                            textAlignment = Layout.Alignment.ALIGN_CENTER;
-                            break;
-                        case TOP_RIGHT:
-                            line = 0.05f; lineAnchor = Cue.ANCHOR_TYPE_START;
-                            position = 0.95f; positionAnchor = Cue.ANCHOR_TYPE_END;
-                            textAlignment = Layout.Alignment.ALIGN_OPPOSITE; // Right justify
-                            break;
-                        case MID_LEFT:
-                            line = 0.5f; lineAnchor = Cue.ANCHOR_TYPE_MIDDLE;
-                            position = 0.05f; positionAnchor = Cue.ANCHOR_TYPE_START;
-                            textAlignment = Layout.Alignment.ALIGN_NORMAL;
-                            break;
-                        case MID_MID:
-                            line = 0.5f; lineAnchor = Cue.ANCHOR_TYPE_MIDDLE;
-                            position = 0.5f; positionAnchor = Cue.ANCHOR_TYPE_MIDDLE;
-                            textAlignment = Layout.Alignment.ALIGN_CENTER;
-                            break;
-                        case MID_RIGHT:
-                            line = 0.5f; lineAnchor = Cue.ANCHOR_TYPE_MIDDLE;
-                            position = 0.95f; positionAnchor = Cue.ANCHOR_TYPE_END;
-                            textAlignment = Layout.Alignment.ALIGN_OPPOSITE;
-                            break;
-                        case BOTTOM_LEFT:
-                            line = 0.95f; lineAnchor = Cue.ANCHOR_TYPE_END;
-                            position = 0.05f; positionAnchor = Cue.ANCHOR_TYPE_START;
-                            textAlignment = Layout.Alignment.ALIGN_NORMAL;
-                            break;
-                        case BOTTOM_RIGHT:
-                            line = 0.95f; lineAnchor = Cue.ANCHOR_TYPE_END;
-                            position = 0.95f; positionAnchor = Cue.ANCHOR_TYPE_END;
-                            textAlignment = Layout.Alignment.ALIGN_OPPOSITE;
-                            break;
-                        case BOTTOM_MID:
-                        default:
-                            line = 0.95f; lineAnchor = Cue.ANCHOR_TYPE_END;
-                            position = 0.5f; positionAnchor = Cue.ANCHOR_TYPE_MIDDLE;
-                            textAlignment = Layout.Alignment.ALIGN_CENTER;
-                            break;
-                    }
+            // Map alignment to ExoPlayer rows
+            switch (alignment) {
+                case TOP_LEFT:
+                    line = 0f + stackOffset; lineAnchor = Cue.ANCHOR_TYPE_START;
+                    position = 0.05f; positionAnchor = Cue.ANCHOR_TYPE_START;
+                    textAlignment = Layout.Alignment.ALIGN_NORMAL;
+                    break;
+                case TOP_MID:
+                    line = 0f + stackOffset; lineAnchor = Cue.ANCHOR_TYPE_START;
+                    position = 0.5f; positionAnchor = Cue.ANCHOR_TYPE_MIDDLE;
+                    textAlignment = Layout.Alignment.ALIGN_CENTER;
+                    break;
+                case TOP_RIGHT:
+                    line = 0f + stackOffset; lineAnchor = Cue.ANCHOR_TYPE_START;
+                    position = 0.95f; positionAnchor = Cue.ANCHOR_TYPE_END;
+                    textAlignment = Layout.Alignment.ALIGN_OPPOSITE;
+                    break;
+                case MID_LEFT:
+                    line = 0.5f; lineType = Cue.LINE_TYPE_FRACTION; lineAnchor = Cue.ANCHOR_TYPE_MIDDLE;
+                    position = 0.05f; positionAnchor = Cue.ANCHOR_TYPE_START;
+                    textAlignment = Layout.Alignment.ALIGN_NORMAL;
+                    break;
+                case MID_MID:
+                    line = 0.5f; lineType = Cue.LINE_TYPE_FRACTION; lineAnchor = Cue.ANCHOR_TYPE_MIDDLE;
+                    position = 0.5f; positionAnchor = Cue.ANCHOR_TYPE_MIDDLE;
+                    textAlignment = Layout.Alignment.ALIGN_CENTER;
+                    break;
+                case MID_RIGHT:
+                    line = 0.5f; lineType = Cue.LINE_TYPE_FRACTION; lineAnchor = Cue.ANCHOR_TYPE_MIDDLE;
+                    position = 0.95f; positionAnchor = Cue.ANCHOR_TYPE_END;
+                    textAlignment = Layout.Alignment.ALIGN_OPPOSITE;
+                    break;
+                case BOTTOM_LEFT:
+                    line = -1f - stackOffset; lineAnchor = Cue.ANCHOR_TYPE_END;
+                    position = 0.05f; positionAnchor = Cue.ANCHOR_TYPE_START;
+                    textAlignment = Layout.Alignment.ALIGN_NORMAL;
+                    break;
+                case BOTTOM_RIGHT:
+                    line = -1f - stackOffset; lineAnchor = Cue.ANCHOR_TYPE_END;
+                    position = 0.95f; positionAnchor = Cue.ANCHOR_TYPE_END;
+                    textAlignment = Layout.Alignment.ALIGN_OPPOSITE;
+                    break;
+                case BOTTOM_MID:
+                default:
+                    line = -1f - stackOffset; lineAnchor = Cue.ANCHOR_TYPE_END;
+                    position = 0.5f; positionAnchor = Cue.ANCHOR_TYPE_MIDDLE;
+                    textAlignment = Layout.Alignment.ALIGN_CENTER;
+                    break;
+            }
 
-                    builder.setLine(line, Cue.LINE_TYPE_FRACTION);
-                    builder.setLineAnchor(lineAnchor);
-                    builder.setPosition(position);
-                    builder.setPositionAnchor(positionAnchor);
-                    builder.setTextAlignment(textAlignment);
+            builder.setLine(line, lineType);
+            builder.setLineAnchor(lineAnchor);
+            builder.setPosition(position);
+            builder.setPositionAnchor(positionAnchor);
+            builder.setTextAlignment(textAlignment);
+
         } else if (subtitle.isBitmap()) {
             builder.setBitmap(subtitle.getBitmap());
             if (subtitle.getFrameWidth() > 0 && subtitle.getFrameHeight() > 0) {
@@ -270,8 +273,24 @@ public class SubtitleManager {
                         mExoSubtitleView.setCues(Collections.emptyList());
                     } else {
                         ArrayList<Cue> exoCues = new ArrayList<>();
+                        // Track the number of active cues for each screen position
+                        HashMap<SubtitleAlignment, Integer> alignmentCounters = new HashMap<>();
+
                         for (Subtitle sub : activeSubs) {
-                            exoCues.add(mapToExoCue(sub));
+                            if (sub.isText()) {
+                                SubtitleAlignment alignment = getAlignment(sub.getText());
+                                // Get current offset (default to 0)
+                                int currentCount = alignmentCounters.containsKey(alignment) ? alignmentCounters.get(alignment) : 0;
+
+                                // Build cue with offset
+                                exoCues.add(mapToExoCue(sub, currentCount));
+
+                                // Increment the counter for the next cue in this position
+                                alignmentCounters.put(alignment, currentCount + 1);
+                            } else {
+                                // Bitmaps don't get row stacking
+                                exoCues.add(mapToExoCue(sub, 0));
+                            }
                         }
                         mExoSubtitleView.setCues(exoCues);
                     }
@@ -457,7 +476,7 @@ public class SubtitleManager {
                             ActiveCue ac = mActiveCues.get(i);
                             if (ac.timeLeft != Long.MAX_VALUE) {
                                 ac.timeLeft -= elapsed;
-                                if (ac.timeLeft <= 30) { // 30ms tolerance
+                                if (ac.timeLeft <= 30) {
                                     mActiveCues.remove(i);
                                     changed = true;
                                 }
