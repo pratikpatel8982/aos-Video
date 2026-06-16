@@ -266,7 +266,7 @@ android {
                          'org/**',
                          "**/libc++_shared.so"
                         ]
-                         
+
             pickFirsts += ['lib/x86/libnvpnativehelper.so',
                            'lib/x86_64/libnvpnativehelper.so',
                            'lib/armeabi-v7a/libnvpnativehelper.so',
@@ -386,6 +386,7 @@ dependencies {
     implementation 'com.github.tony19:logback-android:3.0.0'
     implementation 'io.sentry:sentry-android:8.43.2'
     implementation 'io.sentry:sentry:8.43.2'
+    implementation 'androidx.media3:media3-ui:1.10.1'
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.mockito:mockito-core:5.23.0'
