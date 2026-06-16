@@ -52,6 +52,7 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.ref.WeakReference;
 import java.util.Collections;
+import java.util.ArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -97,8 +98,7 @@ public class SubtitleManager {
     private static boolean mFullScreenWithCutout = true;
 
     private static final int MSG_STOP_SUBTITLE = 0;
-    private static final int MSG_DISPLAY_SUBTITLE = 1;
-    private static final int MSG_REMOVE_SUBTITLE = 2;
+    private static final int MSG_UPDATE_SUBTITLES = 1;
 
     private static final int TXT_SIZE_MIN = 16;
     private static final int TXT_SIZE_MAX = 64;
@@ -259,31 +259,25 @@ public class SubtitleManager {
     private void handleMessage(Message msg) {
         switch (msg.what) {
             case MSG_STOP_SUBTITLE:
-            case MSG_REMOVE_SUBTITLE:
                 if (mExoSubtitleView != null) {
-                    mExoSubtitleView.setCues(Collections.emptyList()); // Clear screen instantly
+                    mExoSubtitleView.setCues(Collections.emptyList());
                 }
                 break;
-            case MSG_DISPLAY_SUBTITLE:
-                if (msg.obj == null) break;
-                Cue cue = mapToExoCue((Subtitle) msg.obj);
+            case MSG_UPDATE_SUBTITLES:
                 if (mExoSubtitleView != null) {
-                    mExoSubtitleView.setCues(Collections.singletonList(cue)); // Render instantly
+                    ArrayList<Subtitle> activeSubs = (ArrayList<Subtitle>) msg.obj;
+                    if (activeSubs == null || activeSubs.isEmpty()) {
+                        mExoSubtitleView.setCues(Collections.emptyList());
+                    } else {
+                        ArrayList<Cue> exoCues = new ArrayList<>();
+                        for (Subtitle sub : activeSubs) {
+                            exoCues.add(mapToExoCue(sub));
+                        }
+                        mExoSubtitleView.setCues(exoCues);
+                    }
                 }
                 break;
         }
-    }
-
-    private void removeSubtitle(Subtitle subtitle) {
-        mHandler.removeMessages(MSG_DISPLAY_SUBTITLE);
-        mHandler.removeMessages(MSG_REMOVE_SUBTITLE);
-        mHandler.sendMessage(mHandler.obtainMessage(MSG_REMOVE_SUBTITLE, subtitle));
-    }
-
-    private void displaySubtitle(Subtitle subtitle) {
-        mHandler.removeMessages(MSG_REMOVE_SUBTITLE);
-        mHandler.removeMessages(MSG_DISPLAY_SUBTITLE);
-        mHandler.sendMessage(mHandler.obtainMessage(MSG_DISPLAY_SUBTITLE, subtitle));
     }
 
     // ... (Keep cleanText, replaceAll, getAlignment exactly as they were in your code) ...
@@ -368,9 +362,17 @@ public class SubtitleManager {
     final class DispSubtitleThread extends Thread {
         private boolean mSuspended = true;
         private boolean mRunning = true;
-        private Subtitle mCurrentSubtitle = null;
-        private Subtitle mNextSubtitle = null;
-        private boolean interrupted = false;
+
+        class ActiveCue {
+            Subtitle subtitle;
+            long timeLeft;
+            ActiveCue(Subtitle s) {
+                subtitle = s;
+                timeLeft = s.isTimed() ? s.getDuration() : Long.MAX_VALUE;
+            }
+        }
+
+        private final ArrayList<ActiveCue> mActiveCues = new ArrayList<>();
 
         void quit() {
             mRunning = false;
@@ -379,117 +381,93 @@ public class SubtitleManager {
             try { join(); } catch (InterruptedException e) {}
         }
 
-        @Override
-        public void run() {
-            int mSubtitleDisplayLeft = 0;
-            while (mRunning) {
-                interrupted = false;
-                synchronized (this) {
-                    while (mSuspended) {
-                        try { wait(); } catch (InterruptedException e) {
-                            if (!mRunning) { clear(); return; }
-                        }
-                    }
-                }
-                synchronized (this) {
-                    if ((mCurrentSubtitle == null && mNextSubtitle == null) || (mCurrentSubtitle == null && mNextSubtitle != null && mNextSubtitle.getDuration() == 0)) {
-                        if (mNextSubtitle != null) mNextSubtitle = null;
-                        mSuspended = true;
-                        continue;
-                    }
-
-                    if (mCurrentSubtitle == null) {
-                        mCurrentSubtitle = mNextSubtitle;
-                        currentSubtitle = mCurrentSubtitle;
-                        mNextSubtitle = null;
-                        displaySubtitle(mCurrentSubtitle);
-                        mSubtitleDisplayLeft = mCurrentSubtitle.getDuration();
-                    }
-                }
-
-                if (mSubtitleDisplayLeft > 0) {
-                    long sleepStart = System.currentTimeMillis();
-                    try {
-                        sleep(mSubtitleDisplayLeft);
-                    } catch (InterruptedException e) {
-                        interrupted = true;
-                        long elapsedTime = System.currentTimeMillis() - sleepStart;
-                        if (mCurrentSubtitle != null && mNextSubtitle != null) {
-                            int currentPosition = mCurrentSubtitle.getPosition() + (int) elapsedTime;
-                            int realCurrentSubtitleDuration;
-                            if (mCurrentSubtitle.getPosition() + mCurrentSubtitle.getDuration() > mNextSubtitle.getPosition()) {
-                                realCurrentSubtitleDuration = mNextSubtitle.getPosition() - mCurrentSubtitle.getPosition();
-                                mCurrentSubtitle.setDuration(realCurrentSubtitleDuration);
-                                mSubtitleDisplayLeft = mNextSubtitle.getPosition() - currentPosition;
-                            } else {
-                                realCurrentSubtitleDuration = mCurrentSubtitle.getDuration();
-                                mSubtitleDisplayLeft -= (int) (System.currentTimeMillis() - sleepStart);
-                            }
-                            if (mNextSubtitle.getDuration() == 0) mNextSubtitle = null;
-                        } else {
-                            mSubtitleDisplayLeft -= (int) (System.currentTimeMillis() - sleepStart);
-                        }
-                    }
-                    if (! interrupted) mSubtitleDisplayLeft -= (int) (System.currentTimeMillis() - sleepStart);
-                }
-
-                if (mSubtitleDisplayLeft <= 0) {
-                    synchronized (this) {
-                        if (mCurrentSubtitle != null) {
-                            // --- ZERO GAP LOGIC ---
-                            boolean isZeroGap = false;
-                            if (mNextSubtitle != null) {
-                                long gap = mNextSubtitle.getPosition() - (mCurrentSubtitle.getPosition() + mCurrentSubtitle.getDuration());
-                                if (gap <= 30) isZeroGap = true; // 30ms tolerance
-                            }
-
-                            // Only clear the screen if there's an actual pause in dialogue
-                            if (!isZeroGap) {
-                                removeSubtitle(mCurrentSubtitle);
-                            }
-
-                            mCurrentSubtitle = null;
-                            currentSubtitle = null;
-                            mSubtitleDisplayLeft = 0;
-                        }
-                    }
+        private void updateUI() {
+            ArrayList<Subtitle> subsToDisplay = new ArrayList<>();
+            synchronized (this) {
+                for (ActiveCue ac : mActiveCues) {
+                    subsToDisplay.add(ac.subtitle);
                 }
             }
-            clear();
+            mHandler.removeMessages(MSG_UPDATE_SUBTITLES);
+            mHandler.sendMessage(mHandler.obtainMessage(MSG_UPDATE_SUBTITLES, subsToDisplay));
         }
 
         synchronized void addSubtitle(Subtitle subtitle) {
             mSuspended = false;
-            if (subtitle.isTimed()) {
-                mNextSubtitle = subtitle;
-                if (!isAlive()) super.start();
-                else interrupt();
+
+            if (!subtitle.isTimed()) {
+                mActiveCues.clear();
+                if (subtitle.getText() != null || subtitle.isBitmap()) {
+                    mActiveCues.add(new ActiveCue(subtitle));
+                }
             } else {
-                if (mCurrentSubtitle != null) {
-                    removeSubtitle(mCurrentSubtitle);
-                    mCurrentSubtitle = null;
-                }
-                if (subtitle.getText() != null) {
-                    mCurrentSubtitle = subtitle;
-                    displaySubtitle(mCurrentSubtitle);
-                }
+                mActiveCues.add(new ActiveCue(subtitle));
             }
+
+            updateUI();
+
+            if (!isAlive()) super.start();
+            else interrupt();
         }
 
-        synchronized void show() {}
         synchronized void clear() {
             mSuspended = true;
-            if (mCurrentSubtitle != null) {
-                removeSubtitle(mCurrentSubtitle);
-                mCurrentSubtitle = null;
-                mNextSubtitle = null;
-            }
-            mHandler.sendMessage(mHandler.obtainMessage(MSG_STOP_SUBTITLE));
+            mActiveCues.clear();
+            updateUI();
         }
+
         synchronized void setSuspended(boolean suspended) {
             if (mSuspended == suspended) return;
             mSuspended = suspended;
             interrupt();
+        }
+
+        synchronized void show() { updateUI(); }
+
+        @Override
+        public void run() {
+            while (mRunning) {
+                long sleepTime = 0;
+
+                synchronized (this) {
+                    while (mSuspended || mActiveCues.isEmpty()) {
+                        try { wait(); } catch (InterruptedException e) { if (!mRunning) return; }
+                    }
+
+                    sleepTime = Long.MAX_VALUE;
+                    for (ActiveCue ac : mActiveCues) {
+                        if (ac.timeLeft < sleepTime) {
+                            sleepTime = ac.timeLeft;
+                        }
+                    }
+                }
+
+                if (sleepTime > 0 && sleepTime != Long.MAX_VALUE) {
+                    long start = System.currentTimeMillis();
+                    try {
+                        sleep(sleepTime);
+                    } catch (InterruptedException e) {
+                        // Woken up
+                    }
+                    long elapsed = System.currentTimeMillis() - start;
+
+                    synchronized (this) {
+                        boolean changed = false;
+                        for (int i = mActiveCues.size() - 1; i >= 0; i--) {
+                            ActiveCue ac = mActiveCues.get(i);
+                            if (ac.timeLeft != Long.MAX_VALUE) {
+                                ac.timeLeft -= elapsed;
+                                if (ac.timeLeft <= 30) { // 30ms tolerance
+                                    mActiveCues.remove(i);
+                                    changed = true;
+                                }
+                            }
+                        }
+
+                        if (changed) updateUI();
+                    }
+                }
+            }
         }
     }
 
@@ -502,14 +480,14 @@ public class SubtitleManager {
             lp.height = mScreenHeight;
             mPlayerView.updateViewLayout(mSubtitleLayout, lp);
         }
-        if (currentSubtitle != null) displaySubtitle(currentSubtitle);
+        show(); // Let the thread redraw the active cues
         setSize(mSubtitleSize);
         updateSubtitleLayout();
     }
 
     public void updateSubtitleLayout() {
         if (! isFirstTime) adjustView();
-        if (currentSubtitle != null) displaySubtitle(currentSubtitle);
+        show(); // Let the thread redraw the active cues
     }
 
     public void setUIExternalSurface(Surface uiSurface) {
