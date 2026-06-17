@@ -81,7 +81,7 @@
     <string name="keep_watching">Keep watching</string>
     <string name="keep_watching_videos">Keep watching</string>
     <string name="video_lists">Playlists</string>
-    
+
     <!-- The string used in main storage list -->
     <string name="external_storage">External</string>
     <string name="internal_storage">Internal</string>
@@ -632,6 +632,8 @@
     <string name="category_languages">Subtitles</string>
     <string name="subtitles_hide_default">Hide subtitles by default</string>
     <string name="subtitles_hide_default_summary">Check if you want to hide subtitles by default</string>
+    <string name="force_legacy_subtitle_engine_title">Use legacy subtitle engine</string>
+    <string name="force_legacy_subtitle_engine_summary">Bypass Media3 and use the old subtitle engine</string>
     <string name="subtitles_credentials_title">OpenSubtitles credentials</string>
     <string name="subtitles_credentials_summary">Provide your opensubtitles credentials to be able to download subtitles</string>
 

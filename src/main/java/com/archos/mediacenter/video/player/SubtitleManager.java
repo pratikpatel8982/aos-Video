@@ -701,7 +701,10 @@ public class SubtitleManager {
     @SuppressWarnings("deprecation")
     private void attachWindow() {
         SharedPreferences mPreferences = PreferenceManager.getDefaultSharedPreferences(mContext);
-        if (mPreferences != null) mFullScreenWithCutout = mPreferences.getBoolean("enable_cutout_mode_short_edges", true);
+        if (mPreferences != null) {
+            mFullScreenWithCutout = mPreferences.getBoolean("enable_cutout_mode_short_edges", true);
+            mForceLegacyEngine = mPreferences.getBoolean("force_legacy_subtitle_engine", false);
+        }
         if (mSubtitleLayout != null) return;
         LayoutInflater inflater = (LayoutInflater) mContext.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
         mSubtitleLayout = inflater.inflate(R.layout.subtitle_layout, mPlayerView, false);

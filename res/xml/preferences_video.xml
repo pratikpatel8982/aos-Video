@@ -301,7 +301,7 @@
             android:summary="@string/preferences_separate_animation_from_movies_summary"
             android:title="@string/preferences_separate_animation_from_movies"
             app:iconSpaceReserved="false"/>
-        
+
         <CheckBoxPreference
             android:defaultValue="true"
             android:key="show_last_added_row"
@@ -334,7 +334,7 @@
             android:summary="@string/preferences_show_all_movies_row_summary"
             android:title="@string/preferences_show_all_movies_row"
             app:iconSpaceReserved="false"/>
-	    
+
 	    <ListPreference
             android:dialogTitle="@string/preferences_movie_sort_order_title"
             android:key="preferences_movie_sort_order"
@@ -349,7 +349,7 @@
             android:summary="@string/preferences_show_all_tv_shows_row_summary"
             android:title="@string/preferences_show_all_tv_shows_row"
             app:iconSpaceReserved="false"/>
-	    
+
 	    <ListPreference
             android:dialogTitle="@string/preferences_tv_show_sort_order_title"
             android:key="preferences_tv_show_sort_order"
@@ -388,6 +388,13 @@
             android:key="subtitles_hide_default"
             android:summary="@string/subtitles_hide_default_summary"
             android:title="@string/subtitles_hide_default"
+            app:iconSpaceReserved="false"/>
+
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:key="force_legacy_subtitle_engine"
+            android:summary="@string/force_legacy_subtitle_engine_summary"
+            android:title="@string/force_legacy_subtitle_engine_title"
             app:iconSpaceReserved="false"/>
 
         <ListPreference
@@ -660,11 +667,11 @@
             android:key="preferences_torrent_path"
             android:title="@string/torrent_path"
             app:iconSpaceReserved="false" />
-    
+
         <com.archos.mediacenter.video.utils.TorrentBlocklistDialogPreference
             android:dialogTitle="@string/torrent_blocklist"
             android:key="preferences_torrent_blocklist"
-            android:title="@string/torrent_blocklist" 
+            android:title="@string/torrent_blocklist"
             android:widgetLayout="@layout/preferences_blocklist_button"
             app:iconSpaceReserved="false"/>
     </PreferenceCategory>
