@@ -68,6 +68,9 @@ public class SubtitleManager {
 
     private View                mSubtitleLayout = null;
     private SubtitleView        mExoSubtitleView; // The new ExoPlayer engine
+    private SubtitleGfxView     mSubtitleGfxView = null; // Legacy Bitmap
+    private Subtitle3DTextView  mSubtitleTxtView = null; // Legacy Text
+    private TextShadowSpan      mTextShadowSpan = null;  // Legacy Shadow
     private SubtitleSpacerView  mSubtitleSpacer = null;
     private LayoutParams        mSubtitleSpacerParams = null;
 
@@ -90,6 +93,7 @@ public class SubtitleManager {
     // this file. If nothing reads this after a full search of the call graph, both the field
     // and setUIMode() are safe to delete.
     private int mUiMode;
+    private boolean mForceLegacyEngine = false;
 
     private boolean isFirstTime = true;
     private Subtitle currentSubtitle = null;
@@ -133,6 +137,20 @@ public class SubtitleManager {
         mRes = context.getResources();
         mForbidWindow = forbidWindow;
         mSubtitlePosHintDrawable = ContextCompat.getDrawable(context, com.archos.mediacenter.video.R.drawable.subtitle_baseline);
+    }
+
+    /**
+    * Determines whether subtitle rendering should bypass the Media3 engine
+    * and fall back to Nova's legacy dual-view rendering pipeline.
+    * * Currently triggered by the presence of an external GL surface (used for 3D SBS/TB).
+    * This method serves as the centralized routing check and provides an easy
+    * integration point for future user preferences forcing the legacy engine.
+    *
+    * @return true if cues should be routed to the legacy pipeline, false for Media3.
+    */
+    private boolean shouldDivertToLegacyPipeline() {
+        // Condition updates automatically if the GL surface is active OR if forced via state
+        return (mUiSurface != null) || mForceLegacyEngine;
     }
 
     /**
@@ -275,13 +293,20 @@ public class SubtitleManager {
     private void handleMessage(Message msg) {
         switch (msg.what) {
             case MSG_STOP_SUBTITLE:
-                if (mExoSubtitleView != null) {
-                    mExoSubtitleView.setCues(Collections.emptyList());
-                }
+                if (mExoSubtitleView != null) mExoSubtitleView.setCues(Collections.emptyList());
+                if (mSubtitleTxtView != null) { mSubtitleTxtView.setText(""); mSubtitleTxtView.setVisibility(View.GONE); }
+                if (mSubtitleGfxView != null) { mSubtitleGfxView.remove(); }
                 break;
+
             case MSG_UPDATE_SUBTITLES:
-                if (mExoSubtitleView != null) {
-                    ArrayList<SubtitleWithOffset> activeSubs = (ArrayList<SubtitleWithOffset>) msg.obj;
+                ArrayList<SubtitleWithOffset> activeSubs = (ArrayList<SubtitleWithOffset>) msg.obj;
+                boolean useLegacyGLPath = shouldDivertToLegacyPipeline();
+
+                if (!useLegacyGLPath) {
+                    // ====== MEDIA3 2D PATH ======
+                    if (mSubtitleTxtView != null) mSubtitleTxtView.setVisibility(View.GONE);
+                    if (mSubtitleGfxView != null) mSubtitleGfxView.setVisibility(View.GONE);
+
                     if (activeSubs == null || activeSubs.isEmpty()) {
                         mExoSubtitleView.setCues(Collections.emptyList());
                     } else {
@@ -289,15 +314,61 @@ public class SubtitleManager {
 
                         for (SubtitleWithOffset subWithOffset : activeSubs) {
                             Subtitle sub = subWithOffset.subtitle;
-                            if (sub.isText()) {
-                                // Build cue using its locked-in persistent offset row
-                                exoCues.add(mapToExoCue(sub, subWithOffset.stackOffset));
-                            } else {
-                                // Bitmaps don't get row stacking
-                                exoCues.add(mapToExoCue(sub, 0));
-                            }
+                            exoCues.add(mapToExoCue(sub, sub.isText() ? subWithOffset.stackOffset : 0));
                         }
                         mExoSubtitleView.setCues(exoCues);
+                    }
+                } else {
+                    // ====== LEGACY 3D/GL PATH ======
+                    mExoSubtitleView.setCues(Collections.emptyList());
+
+                    if (activeSubs == null || activeSubs.isEmpty()) {
+                        if (mSubtitleTxtView != null) { mSubtitleTxtView.setText(""); mSubtitleTxtView.setVisibility(View.GONE); mSubtitleTxtView.postInvalidate(); }
+                        if (mSubtitleGfxView != null) { mSubtitleGfxView.remove(); }
+                        return;
+                    }
+
+                    SpannableStringBuilder combinedText = new SpannableStringBuilder();
+                    Subtitle bitmapSub = null;
+                    SubtitleAlignment lastAlignment = SubtitleAlignment.BOTTOM_MID;
+
+                    for (SubtitleWithOffset subWithOffset : activeSubs) {
+                        Subtitle sub = subWithOffset.subtitle;
+                        if (sub.isText()) {
+                            if (combinedText.length() > 0) combinedText.append("\n"); // Concatenate overlaps for legacy
+                            combinedText.append(HtmlCompat.fromHtml(cleanText(sub.getText()), HtmlCompat.FROM_HTML_MODE_LEGACY));
+                            lastAlignment = getAlignment(sub.getText());
+                        } else if (sub.isBitmap() && bitmapSub == null) {
+                            bitmapSub = sub; // Grab the first bitmap
+                        }
+                    }
+
+                    // Render Legacy Text
+                    if (combinedText.length() > 0 && mSubtitleTxtView != null) {
+                        mSubtitleTxtView.setVisibility(View.VISIBLE);
+                        adjustSubtitlePosition(lastAlignment);
+
+                        if (mTextShadowSpan == null) {
+                            float sRadius = mRes.getDimension(R.dimen.subtitles_shadow_radius);
+                            float sDx = mRes.getDimension(R.dimen.subtitles_shadow_dx);
+                            float sDy = mRes.getDimension(R.dimen.subtitles_shadow_dy);
+                            int sColor = ContextCompat.getColor(mContext, R.color.subtitles_shadow_color);
+                            mTextShadowSpan = new TextShadowSpan(sRadius, sDx, sDy, sColor);
+                        }
+                        combinedText.setSpan(mTextShadowSpan, 0, combinedText.length(), android.text.Spanned.SPAN_INCLUSIVE_INCLUSIVE);
+                        mSubtitleTxtView.setText(combinedText);
+                        mSubtitleTxtView.postInvalidate();
+                    } else if (mSubtitleTxtView != null) {
+                        mSubtitleTxtView.setText("");
+                        mSubtitleTxtView.setVisibility(View.GONE);
+                        mSubtitleTxtView.postInvalidate();
+                    }
+
+                    // Render Legacy Bitmaps
+                    if (bitmapSub != null && mSubtitleGfxView != null) {
+                        mSubtitleGfxView.setSubtitle(bitmapSub.getBitmap(), bitmapSub.getBounds(), bitmapSub.getFrameWidth(), bitmapSub.getFrameHeight());
+                    } else if (mSubtitleGfxView != null) {
+                        mSubtitleGfxView.remove();
                     }
                 }
                 break;
@@ -362,18 +433,9 @@ public class SubtitleManager {
 
     // --- Public Facade API ---
     public int getColor() { return mColor; }
-    public void setColor(int color){ mColor = color; updateExoPlayerStyle(); }
-
     public boolean getOutlineState() { return mOutline; }
-    public void setOutlineState(boolean outline) { mOutline = outline; updateExoPlayerStyle(); }
-
     public boolean getBackgroundState() { return mBackground; }
-    public void setBackgroundState(boolean background) { mBackground = background; updateExoPlayerStyle(); }
-
     public int getBackgroundOpacity() { return mBgOpacity; }
-    public void setBackgroundOpacity(int opacity) { mBgOpacity = opacity; updateExoPlayerStyle(); }
-
-    public void setSize(int size) { mSubtitleSize = size; updateExoPlayerStyle(); }
     public int getSize() { return mSubtitleSize; }
 
     public static float calcTextSize(int size) {
@@ -381,7 +443,52 @@ public class SubtitleManager {
         return (tmp / 100f) * TXT_SIZE_RANGE + TXT_SIZE_MIN;
     }
 
-    public void setUIMode(int uiMode) { mUiMode = uiMode; }
+    public void setUIMode(int uiMode) {
+        mUiMode = uiMode;
+        if (mSubtitleTxtView != null) mSubtitleTxtView.setUIMode(uiMode);
+    }
+
+    public void setColor(int color) {
+        mColor = color;
+        updateExoPlayerStyle();
+        if (mSubtitleTxtView != null) mSubtitleTxtView.setTextColor(color);
+    }
+
+    public void setOutlineState(boolean outline) {
+        mOutline = outline;
+        updateExoPlayerStyle();
+        if (mSubtitleTxtView != null) mSubtitleTxtView.setOutlineState(outline);
+    }
+
+    public void setBackgroundState(boolean background) {
+        mBackground = background;
+        updateExoPlayerStyle();
+        if (mSubtitleTxtView != null) mSubtitleTxtView.setBackgroundState(background);
+    }
+
+    public void setBackgroundOpacity(int opacity) {
+        mBgOpacity = opacity;
+        updateExoPlayerStyle();
+        if (mSubtitleTxtView != null) mSubtitleTxtView.setBackgroundOpacity(opacity);
+    }
+
+    public void setSize(int size) {
+        mSubtitleSize = size;
+        updateExoPlayerStyle();
+        if (mSubtitleGfxView != null) mSubtitleGfxView.setSize(size, mScreenWidth, mScreenHeight);
+        if (mSubtitleTxtView != null) mSubtitleTxtView.setTextSize(calcTextSize(size));
+    }
+    /**
+    * Force the subtitle manager to completely bypass the Media3 engine
+    * and fall back entirely to the legacy TextView/GfxView pipeline.
+    */
+    public void setForceLegacyEngine(boolean forceLegacy) {
+        if (this.mForceLegacyEngine != forceLegacy) {
+            this.mForceLegacyEngine = forceLegacy;
+            // Trigger a redraw if a video is actively running so the engine swaps instantly
+            show();
+        }
+    }
 
     final class DispSubtitleThread extends Thread {
         private boolean mSuspended = true;
@@ -573,6 +680,7 @@ public class SubtitleManager {
             lp.height = mScreenHeight;
             mPlayerView.updateViewLayout(mSubtitleLayout, lp);
         }
+        if (mSubtitleTxtView != null) mSubtitleTxtView.setScreenSize(displayWidth, displayHeight);
         show(); // Let the thread redraw the active cues
         setSize(mSubtitleSize);
         updateSubtitleLayout();
@@ -586,6 +694,8 @@ public class SubtitleManager {
     public void setUIExternalSurface(Surface uiSurface) {
         mUiSurface = uiSurface;
         if (mSubtitleSpacer != null) mSubtitleSpacer.setRenderingSurface(uiSurface);
+        if (mSubtitleGfxView != null) mSubtitleGfxView.setRenderingSurface(uiSurface);
+        if (mSubtitleTxtView != null) mSubtitleTxtView.setRenderingSurface(uiSurface);
     }
 
     @SuppressWarnings("deprecation")
@@ -602,6 +712,21 @@ public class SubtitleManager {
         // WIRE UP EXOPLAYER VIEW HERE
         mExoSubtitleView = mSubtitleLayout.findViewById(R.id.exo_subtitle_view);
         updateExoPlayerStyle(); // Apply initial styles
+
+        // LEGACY CODE
+        mSubtitleGfxView = mSubtitleLayout.findViewById(R.id.subtitle_gfx_view);
+            mSubtitleTxtView = mSubtitleLayout.findViewById(R.id.subtitle_txt_view);
+
+            if (mSubtitleTxtView != null) {
+                mSubtitleTxtView.setScreenSize(mScreenWidth, mScreenHeight);
+                mSubtitleTxtView.setUIMode(mUiMode);
+                mSubtitleTxtView.setBackgroundState(mBackground);
+                mSubtitleTxtView.setBackgroundOpacity(mBgOpacity);
+                mSubtitleTxtView.setTextColor(mColor);
+                mSubtitleTxtView.setOutlineState(mOutline);
+                mSubtitleTxtView.setTextSize(calcTextSize(mSubtitleSize));
+            }
+        // ----------
 
         if (mSubtitleSpacer == null || mExoSubtitleView == null) return;
 
@@ -690,6 +815,31 @@ public class SubtitleManager {
         mSubtitleSpacer.setLayoutParams(mSubtitleSpacerParams);
         mSubtitleSpacer.requestLayout();
         mSubtitleSpacer.postInvalidate();
+    }
+
+    private void adjustSubtitlePosition(SubtitleAlignment alignment) {
+        if (mSubtitleTxtView == null) return;
+        int gravity = switch (alignment) {
+            case BOTTOM_LEFT -> Gravity.BOTTOM | Gravity.START;
+            case BOTTOM_MID -> Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            case BOTTOM_RIGHT -> Gravity.BOTTOM | Gravity.END;
+            case MID_LEFT -> Gravity.CENTER_VERTICAL | Gravity.START;
+            case MID_MID -> Gravity.CENTER;
+            case MID_RIGHT -> Gravity.CENTER_VERTICAL | Gravity.END;
+            case TOP_LEFT -> Gravity.TOP | Gravity.START;
+            case TOP_MID -> Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+            case TOP_RIGHT -> Gravity.TOP | Gravity.END;
+        };
+        int textJustification = getTextJustification(alignment);
+        mSubtitleTxtView.setGravity3D(gravity, textJustification);
+    }
+
+    private int getTextJustification(SubtitleAlignment alignment) {
+        return switch (alignment) {
+            case BOTTOM_LEFT, MID_LEFT, TOP_LEFT -> Gravity.START;
+            case BOTTOM_RIGHT, MID_RIGHT, TOP_RIGHT -> Gravity.END;
+            case BOTTOM_MID, MID_MID, TOP_MID -> Gravity.CENTER_HORIZONTAL;
+        };
     }
 
     public void addSubtitle(Subtitle subtitle) {
