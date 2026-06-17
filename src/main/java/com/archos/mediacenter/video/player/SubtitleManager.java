@@ -24,6 +24,7 @@ import android.content.res.Resources;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
+import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
@@ -259,12 +260,27 @@ public class SubtitleManager {
     // -------------------------------------------------------------
     private void updateExoPlayerStyle() {
         if (mExoSubtitleView == null) return;
+        // Lock the font to the thicker legacy weight
+        Typeface legacyTypeface = Typeface.create("sans-serif-medium", Typeface.NORMAL);
+        int edgeType;
+        int edgeColor;
 
-        int edgeType = mOutline ? CaptionStyleCompat.EDGE_TYPE_OUTLINE : CaptionStyleCompat.EDGE_TYPE_NONE;
+        if (mOutline) {
+            // Legacy uses a hardcoded 4.0f Black Stroke
+            edgeType = CaptionStyleCompat.EDGE_TYPE_OUTLINE;
+            edgeColor = Color.BLACK;
+        } else if (mBackground) {
+            edgeType = CaptionStyleCompat.EDGE_TYPE_NONE;
+            edgeColor = Color.TRANSPARENT;
+        } else {
+            // Legacy defaults to a Drop Shadow from resources
+            edgeType = CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW;
+            edgeColor = ContextCompat.getColor(mContext, R.color.subtitles_shadow_color);
+        }
         int bgColor = mBackground ? Color.argb(mBgOpacity, 0, 0, 0) : Color.TRANSPARENT;
 
         CaptionStyleCompat style = new CaptionStyleCompat(
-            mColor, bgColor, Color.TRANSPARENT, edgeType, Color.BLACK, null
+            mColor, bgColor, Color.TRANSPARENT, edgeType, edgeColor, legacyTypeface
         );
 
         mExoSubtitleView.setStyle(style);
