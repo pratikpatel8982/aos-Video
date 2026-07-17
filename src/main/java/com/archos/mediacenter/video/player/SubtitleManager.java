@@ -100,8 +100,8 @@ public class SubtitleManager {
         }
     }
 
-    public int getBackgroundOpacity() { 
-        return mBgOpacity; 
+    public int getBackgroundOpacity() {
+        return mBgOpacity;
     }
 
     public void setBackgroundOpacity(int opacity) {
@@ -256,6 +256,7 @@ public class SubtitleManager {
         setFontSizePt(mFontSizePt);
         updateSubtitleLayout();
     }
+
 
     public void updateSubtitleLayout() {
         if (log.isDebugEnabled()) log.debug("updateSubtitleLayout");
@@ -420,7 +421,7 @@ public class SubtitleManager {
     /**
      * after you enable this you need to call fadeSubtitlePositionHint(true)
      * otherwise the Alpha of the Drawable stays at 0
-     * @param show 
+     * @param show
      */
     public void setShowSubtitlePositionHint (boolean show) {
         if (log.isDebugEnabled()) log.debug("setShowSubtitlePositionHint: {}", show);

@@ -503,6 +503,16 @@ public class FloatingPlayerService extends Service implements PlayerService.Play
 
             PlayerService.sPlayerService.setPlayer();
             mSubtitleManager = new SubtitleManager(this, (ViewGroup) mFloatingPlayerRootView.findViewById(R.id.subtitle_root_view), mWindowManager, true);
+            // NEW: FloatingPlayerService previously never called setListener() on its
+            // SurfaceController at all, so onSwitchVideoFormat was simply never
+            // delivered here. Wire it the same way PlayerActivity does, so subtitle
+            // layout gets refreshed on video-format switches in floating mode too.
+            mSurfaceController.setListener(new SurfaceController.Listener() {
+                @Override
+                public void onSwitchVideoFormat(int fmt, int autoFmt) {
+                    if (mSubtitleManager != null) mSubtitleManager.updateSubtitleLayout();
+                }
+            });
             updateSizes(mParamsF);
 
             // Get the last intent which has all video data, then add the position extra
