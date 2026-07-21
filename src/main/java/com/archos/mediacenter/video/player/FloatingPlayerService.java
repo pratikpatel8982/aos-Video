@@ -776,7 +776,42 @@ public class FloatingPlayerService extends Service implements PlayerService.Play
     public void onAudioMetadataUpdated(VideoMetadata vMetadata, int currentAudio) {    }
 
     @Override
-    public void onSubtitleMetadataUpdated(VideoMetadata vMetadata, int currentSubtitle) {    }
+    public void onSubtitleMetadataUpdated(VideoMetadata vMetadata, int currentSubtitle) {
+        // Previously a no-op: mSurfaceController.setSubtitleLayoutMode() (formerly
+        // setSubtitleIsPlainText()) was never called in floating-player mode, so
+        // mSubtitleView's sizing (tethered vs. full-container, and now top/bottom margin
+        // usage) never reflected the actual active track's category here -- it just sat at
+        // whatever the field default happened to be for the entire session. This mirrors
+        // PlayerActivity.updateSubtitleLayoutMode()'s classification logic; it's duplicated
+        // rather than shared because this class doesn't keep a VideoInfo/subtitleTrack of
+        // its own the way PlayerActivity does (see the empty setVideoInfo() stub above) --
+        // currentSubtitle, passed directly by this callback, is used instead.
+        int category = SurfaceController.SUBTITLE_CATEGORY_PLAIN_TEXT;
+        if (vMetadata != null && currentSubtitle >= 0 && currentSubtitle < vMetadata.getSubtitleTrackNb()) {
+            VideoMetadata.SubtitleTrack track = vMetadata.getSubtitleTrack(currentSubtitle);
+            if (track != null) {
+                if (track.isGfx) {
+                    category = SurfaceController.SUBTITLE_CATEGORY_GFX;
+                } else {
+                    String fmt = com.archos.mediacenter.video.utils.VideoUtils.getSubtitleFormatLabel(this, track.format);
+                    if (fmt != null) {
+                        fmt = fmt.toLowerCase();
+                        if (fmt.contains("ass") || fmt.contains("ssa")) {
+                            category = SurfaceController.SUBTITLE_CATEGORY_ASS;
+                        }
+                    }
+                }
+            }
+        }
+        boolean useMargins = PreferenceManager.getDefaultSharedPreferences(this)
+                .getBoolean(PlayerActivity.KEY_SUBTITLE_USE_MARGINS, true);
+        if (mSurfaceController != null) {
+            mSurfaceController.setSubtitleLayoutMode(category, useMargins);
+        }
+        if (mSubtitleManager != null) {
+            mSubtitleManager.setSubtitleIsGfx(category == SurfaceController.SUBTITLE_CATEGORY_GFX);
+        }
+    }
 
     @Override
     public void onBufferingUpdate(int percent) {   }
