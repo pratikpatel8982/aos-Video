@@ -93,6 +93,13 @@ public class SubtitleManager {
     private int mBackgroundColor;
     private float mOutlineWidth;
     private float mShadowWidth;
+    private String mFontFamily;
+    private String mFontsFolderPath;
+    private String mDefaultFontName;
+
+    /** SharedPreferences keys for the custom fonts folder feature (MX Player / mpv-android style). */
+    private static final String PREF_FONTS_FOLDER_PATH = "subtitle_fonts_folder_path";
+    private static final String PREF_DEFAULT_FONT_NAME  = "subtitle_default_font_name";
 
     public static final int BG_MODE_FLOATING    = 0;
     public static final int BG_MODE_BOXED_LINE  = 1;
@@ -228,6 +235,95 @@ public class SubtitleManager {
         mShadowWidth = px;
         if (Player.sPlayer != null && Player.sPlayer.getSubtitleEngine() != null) {
             Player.sPlayer.getSubtitleEngine().setShadowWidth(px);
+        }
+    }
+
+    public String getFontFamily() { return mFontFamily; }
+
+    /**
+     * Sets the active font family. In Custom/Force override mode (and always for plain-text
+     * SRT/VTT), this name is force-applied to every subtitle style -- see sync_styles() in
+     * sub_format_ssa.c. To use a font from a custom fonts folder, pass its family name here
+     * AFTER calling {@link #setFontsFolder(String)} with the folder containing it, so libass
+     * has already registered the file and can resolve the name.
+     */
+    public void setFontFamily(String familyName) {
+        mFontFamily = familyName;
+        if (Player.sPlayer != null && Player.sPlayer.getSubtitleEngine() != null) {
+            Player.sPlayer.getSubtitleEngine().setFontFamily(familyName);
+        }
+    }
+
+    public String getFontsFolderPath() { return mFontsFolderPath; }
+
+    /**
+     * Sets a custom fonts folder (MX Player / mpv-android style "third fonts folder"):
+     * every .ttf/.otf/.ttc file found in {@code dirPath} is registered with libass and takes
+     * priority over the system fontconfig database when a style names a matching font family.
+     * Persisted to SharedPreferences so it survives across playback sessions. Takes effect
+     * starting with the next track opened -- if subtitles are already playing, closing and
+     * reopening the track (e.g. toggling the track off/on) makes it take effect immediately.
+     * Pass null to disable and fall back to fontconfig-only resolution.
+     */
+    public void setFontsFolder(String dirPath) {
+        mFontsFolderPath = dirPath;
+        PreferenceManager.getDefaultSharedPreferences(mContext).edit()
+                .putString(PREF_FONTS_FOLDER_PATH, dirPath)
+                .apply();
+        if (Player.sPlayer != null && Player.sPlayer.getSubtitleEngine() != null) {
+            Player.sPlayer.getSubtitleEngine().setFontsFolder(dirPath);
+        }
+    }
+
+    /** Restores the fonts folder path last saved via {@link #setFontsFolder(String)}, or null if never set. */
+    public String loadSavedFontsFolder() {
+        return PreferenceManager.getDefaultSharedPreferences(mContext).getString(PREF_FONTS_FOLDER_PATH, null);
+    }
+
+    public String getDefaultFontName() { return mDefaultFontName; }
+
+    /**
+     * Sets the fallback family name libass uses when nothing else names a font -- this is
+     * what plain SRT/VTT subtitles render with, since they carry no font info of their own.
+     * Should name a file that's resolvable given the folder last passed to
+     * {@link #setFontsFolder(String)}. Persisted across sessions; pass null to fall back to
+     * the generic "sans-serif" fontconfig alias.
+     */
+    public void setDefaultFontName(String familyName) {
+        mDefaultFontName = familyName;
+        PreferenceManager.getDefaultSharedPreferences(mContext).edit()
+                .putString(PREF_DEFAULT_FONT_NAME, familyName)
+                .apply();
+        if (Player.sPlayer != null && Player.sPlayer.getSubtitleEngine() != null) {
+            Player.sPlayer.getSubtitleEngine().setDefaultFontName(familyName);
+        }
+    }
+
+    /** Restores the default font name last saved via {@link #setDefaultFontName(String)}, or null if never set. */
+    public String loadSavedDefaultFontName() {
+        return PreferenceManager.getDefaultSharedPreferences(mContext).getString(PREF_DEFAULT_FONT_NAME, null);
+    }
+
+    /**
+     * Re-applies the persisted custom-fonts-folder settings (fonts folder + default font
+     * name) to whatever SubtitleEngine is currently active. Call this once right after a new
+     * SubtitleEngine is created/attached (wherever Player/AvosPlayer does `new SubtitleEngine()`
+     * today) -- a freshly created native engine has fonts_dir/default_font_name unset, and
+     * these settings are only pushed to the engine reactively by setFontsFolder()/
+     * setDefaultFontName() above, so a fresh engine needs an explicit initial push of
+     * whatever the user saved in a previous session.
+     */
+    public void applySavedFontSettings() {
+        if (Player.sPlayer == null || Player.sPlayer.getSubtitleEngine() == null) return;
+        String savedFolder = loadSavedFontsFolder();
+        String savedDefaultFont = loadSavedDefaultFontName();
+        mFontsFolderPath = savedFolder;
+        mDefaultFontName = savedDefaultFont;
+        if (savedFolder != null) {
+            Player.sPlayer.getSubtitleEngine().setFontsFolder(savedFolder);
+        }
+        if (savedDefaultFont != null) {
+            Player.sPlayer.getSubtitleEngine().setDefaultFontName(savedDefaultFont);
         }
     }
 

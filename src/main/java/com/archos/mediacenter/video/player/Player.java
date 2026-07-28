@@ -23,6 +23,7 @@ import static com.archos.mediacenter.video.utils.CodecDiscovery.getHdrScreenCapa
 import static com.archos.mediacenter.video.utils.CodecDiscovery.resetHdrCapabilities;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.SurfaceTexture;
 import android.media.AudioAttributes;
@@ -450,6 +451,17 @@ public class Player implements IPlayerControl,
         reset();
         mUri = uri;
         mExtraMap = extraMap;
+
+        // Custom subtitle fonts folder (MX Player / mpv-android style): re-read and re-push
+        // on every new video rather than only once in the Player constructor, because
+        // mSubtitleEngine is created once and reused across every video played within this
+        // same Player/activity instance (see constructor above) -- if the user changes this
+        // setting in the Settings menu and comes back to play another video WITHOUT the
+        // activity being recreated, the old value would otherwise stick around. Cheap no-op
+        // reads if the user never touched the setting (both come back null and the
+        // SubtitleEngine setters below are skipped).
+        applySubtitleFontSettings();
+
         String scheme = mUri.getScheme();
         mIsLocalVideo = false;
         if (scheme == null || scheme.equals("file")) {
@@ -470,6 +482,56 @@ public class Player implements IPlayerControl,
         }
         if (log.isDebugEnabled()) log.debug("setVideoURI: {}", uri);
         openVideo();
+    }
+
+    // Reads the custom-fonts-folder settings from SharedPreferences and pushes them into the
+    // native engine. KEY_SUBTITLE_FONTS_FOLDER is always this app's own private cache
+    // directory path (see SubtitleFontsFolderSync in VideoPreferencesCommon.java), kept in
+    // sync with whatever SAF folder the user picked in Settings -- native code never sees the
+    // user's actual folder or a content:// URI, just a plain path it can fopen() exactly as
+    // before. These are picked up fresh by the SSA backend the NEXT time a track is opened
+    // (sub_engine_open_track() snapshots them into SUB_FORMAT_OPEN_PARAMS every call -- see
+    // sub_engine.c), so calling this before openVideo() below is what makes the setting apply
+    // to the video about to start, without needing any live mid-playback update path.
+    //
+    // IMPORTANT: also pushes the chosen default font through setFontFamily(), not just
+    // setDefaultFontName(). Confirmed via LIBASS SUB_FONTS logcat output that setDefaultFontName()
+    // alone is not sufficient: sync_styles() in sub_format_ssa.c ALWAYS force-applies
+    // u.font_family onto every ASS style's FontName whenever it's non-empty (force_all is
+    // always true for SRT/plain-text, which is exactly where this feature matters most) --
+    // and font_family is never empty, since sub_style_create() initializes it to a hardcoded
+    // "roboto medium" default that otherwise permanently shadows whatever default_font_name
+    // was set, since ass_set_fonts()'s fallback is only ever consulted when a style names NO
+    // font at all. Setting font_family here too means the style's FontName becomes the user's
+    // actual chosen default, so libass's fontselect resolves the RIGHT family from the start,
+    // rather than relying on the fallback path a force-applied style never falls through to.
+    private void applySubtitleFontSettings() {
+        if (mSubtitleEngine == null) return;
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(mContext);
+        String fontsFolder = prefs.getString(VideoPreferencesCommon.KEY_SUBTITLE_FONTS_FOLDER, null);
+        String defaultFont = prefs.getString(VideoPreferencesCommon.KEY_SUBTITLE_DEFAULT_FONT, null);
+        mSubtitleEngine.setFontsFolder(fontsFolder);
+        mSubtitleEngine.setDefaultFontName(defaultFont);
+        if (defaultFont != null && !defaultFont.isEmpty()) {
+            // defaultFont is the exact filename stored by refreshSubtitleDefaultFontList()
+            // (e.g. "bahnschrift.ttf") -- strip a known font extension to get a best-effort
+            // family-name guess, mirroring font_filename_to_family_guess() on the native
+            // side exactly, so both paths agree on the same resolved name. This is a guess.
+            // A font shipped as e.g. "Font-Bold-Italic.ttf" whose true internal family name
+            // is just "Font" won't be handled correctly -- there is no substitute here for
+            // actually reading the font file's name table, which neither side does today.
+            mSubtitleEngine.setFontFamily(stripFontExtension(defaultFont));
+        }
+    }
+
+    private static String stripFontExtension(String filename) {
+        String lower = filename.toLowerCase(java.util.Locale.ROOT);
+        for (String ext : new String[]{".ttf", ".otf", ".ttc"}) {
+            if (lower.endsWith(ext)) {
+                return filename.substring(0, filename.length() - ext.length());
+            }
+        }
+        return filename;
     }
 
     @SuppressWarnings("deprecation") // abandonAudioFocus: API 26+ uses abandonAudioFocusRequest
