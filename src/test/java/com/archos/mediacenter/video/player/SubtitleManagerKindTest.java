@@ -51,7 +51,7 @@ public class SubtitleManagerKindTest {
 
     @Test
     public void kindFromNative_knownValuesPassThrough() {
-        assertEquals(SubtitleManager.KIND_STYLED, SubtitleManager.kindFromNative(1));
+        assertEquals(SubtitleManager.KIND_SSA, SubtitleManager.kindFromNative(1));
         assertEquals(SubtitleManager.KIND_PLAIN_TEXT, SubtitleManager.kindFromNative(2));
         assertEquals(SubtitleManager.KIND_GRAPHIC, SubtitleManager.kindFromNative(3));
         assertEquals(SubtitleManager.KIND_UNSUPPORTED, SubtitleManager.kindFromNative(4));
@@ -68,27 +68,26 @@ public class SubtitleManagerKindTest {
 
     @Test
     public void predicatesPerKind() {
-        check(SubtitleManager.KIND_NONE,        false, false, false);
-        check(SubtitleManager.KIND_STYLED,      false, true,  false);
-        check(SubtitleManager.KIND_PLAIN_TEXT,  false, true,  false);
-        check(SubtitleManager.KIND_GRAPHIC,     true,  false, true);
-        check(SubtitleManager.KIND_UNSUPPORTED, false, false, true);
+        check(SubtitleManager.KIND_NONE,        false, false);
+        check(SubtitleManager.KIND_SSA,      false, true);
+        check(SubtitleManager.KIND_PLAIN_TEXT,  false, true);
+        check(SubtitleManager.KIND_GRAPHIC,     true,  false);
+        check(SubtitleManager.KIND_UNSUPPORTED, false, false);
     }
 
-    private void check(int kind, boolean graphic, boolean styleOk, boolean blocked) {
+    private void check(int kind, boolean graphic, boolean styleOk) {
         // move to a different kind first so setSubtitleKind() really transitions
-        mManager.setSubtitleKind(kind == SubtitleManager.KIND_STYLED
-                ? SubtitleManager.KIND_PLAIN_TEXT : SubtitleManager.KIND_STYLED);
+        mManager.setSubtitleKind(kind == SubtitleManager.KIND_SSA
+                ? SubtitleManager.KIND_PLAIN_TEXT : SubtitleManager.KIND_SSA);
         mManager.setSubtitleKind(kind);
         assertEquals("kind " + kind, kind, mManager.getSubtitleKind());
         assertEquals("isGraphic, kind " + kind, graphic, mManager.isGraphic());
         assertEquals("supportsUserStyle, kind " + kind, styleOk, mManager.supportsUserStyle());
-        assertEquals("isUserStyleBlocked, kind " + kind, blocked, mManager.isUserStyleBlocked());
     }
 
     @Test
     public void layoutCategoryPerKind() {
-        mManager.setSubtitleKind(SubtitleManager.KIND_STYLED);
+        mManager.setSubtitleKind(SubtitleManager.KIND_SSA);
         assertEquals(SurfaceController.SUBTITLE_CATEGORY_ASS, mManager.getLayoutCategory());
         mManager.setSubtitleKind(SubtitleManager.KIND_GRAPHIC);
         assertEquals(SurfaceController.SUBTITLE_CATEGORY_GFX, mManager.getLayoutCategory());
@@ -114,21 +113,20 @@ public class SubtitleManagerKindTest {
         mManager.setVerticalPosition(40); // PlayerActivity passes the user's value on every track
         assertEquals(40, mManager.getVerticalPosition());
 
-        mManager.setSubtitleKind(SubtitleManager.KIND_STYLED);
+        mManager.setSubtitleKind(SubtitleManager.KIND_SSA);
         assertEquals(40, mManager.getVerticalPosition());
     }
 
     @Test
     public void staticRulesMatchInstanceRules() {
         for (int kind = SubtitleManager.KIND_NONE; kind <= SubtitleManager.KIND_UNSUPPORTED; kind++) {
-            mManager.setSubtitleKind(kind == SubtitleManager.KIND_STYLED
-                    ? SubtitleManager.KIND_PLAIN_TEXT : SubtitleManager.KIND_STYLED);
+            mManager.setSubtitleKind(kind == SubtitleManager.KIND_SSA
+                    ? SubtitleManager.KIND_PLAIN_TEXT : SubtitleManager.KIND_SSA);
             mManager.setSubtitleKind(kind);
             assertEquals(SubtitleManager.isGraphic(kind), mManager.isGraphic());
             assertEquals(SubtitleManager.isPlainText(kind), mManager.isPlainText());
             assertEquals(SubtitleManager.isStyled(kind), mManager.isStyled());
             assertEquals(SubtitleManager.supportsUserStyle(kind), mManager.supportsUserStyle());
-            assertEquals(SubtitleManager.isUserStyleBlocked(kind), mManager.isUserStyleBlocked());
             assertEquals(SubtitleManager.canChooseOverrideMode(kind), mManager.canChooseOverrideMode());
         }
     }
@@ -140,9 +138,9 @@ public class SubtitleManagerKindTest {
         for (int mode : stored) {
             assertEquals(SubtitleManager.OVERRIDE_CUSTOM,
                     SubtitleManager.effectiveOverrideMode(SubtitleManager.KIND_PLAIN_TEXT, mode));
-            assertEquals(mode, SubtitleManager.effectiveOverrideMode(SubtitleManager.KIND_STYLED, mode));
+            assertEquals(mode, SubtitleManager.effectiveOverrideMode(SubtitleManager.KIND_SSA, mode));
         }
-        assertTrue(SubtitleManager.canChooseOverrideMode(SubtitleManager.KIND_STYLED));
+        assertTrue(SubtitleManager.canChooseOverrideMode(SubtitleManager.KIND_SSA));
         assertFalse(SubtitleManager.canChooseOverrideMode(SubtitleManager.KIND_PLAIN_TEXT));
         assertFalse(SubtitleManager.canChooseOverrideMode(SubtitleManager.KIND_GRAPHIC));
     }
@@ -153,7 +151,7 @@ public class SubtitleManagerKindTest {
         mManager.setSubtitleKind(SubtitleManager.KIND_PLAIN_TEXT);
         assertEquals(SubtitleManager.OVERRIDE_CUSTOM, mManager.getEffectiveOverrideMode());
         assertEquals(SubtitleManager.OVERRIDE_SCALE_ONLY, mManager.getOverrideMode());
-        mManager.setSubtitleKind(SubtitleManager.KIND_STYLED);
+        mManager.setSubtitleKind(SubtitleManager.KIND_SSA);
         assertEquals(SubtitleManager.OVERRIDE_SCALE_ONLY, mManager.getEffectiveOverrideMode());
     }
 
@@ -170,7 +168,7 @@ public class SubtitleManagerKindTest {
         mManager.setSubtitleKind(SubtitleManager.KIND_GRAPHIC);
         mManager.setActiveTrack(null);
         assertEquals(SubtitleManager.KIND_NONE, mManager.getSubtitleKind());
-        assertFalse(mManager.isUserStyleBlocked());
+        assertFalse(mManager.supportsUserStyle()); // the panel shows its "no subtitle" note
     }
 
     @Test
@@ -178,7 +176,7 @@ public class SubtitleManagerKindTest {
         mManager.setActiveTrack(trackWithRawKind(3));
         assertTrue(mManager.isGraphic());
         mManager.setActiveTrack(trackWithRawKind(1));
-        assertEquals(SubtitleManager.KIND_STYLED, mManager.getSubtitleKind());
+        assertEquals(SubtitleManager.KIND_SSA, mManager.getSubtitleKind());
         mManager.setActiveTrack(trackWithRawKind(0)); // native sent nothing
         assertEquals(SubtitleManager.KIND_UNSUPPORTED, mManager.getSubtitleKind());
     }
