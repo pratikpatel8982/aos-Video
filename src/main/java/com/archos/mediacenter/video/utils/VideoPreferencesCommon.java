@@ -343,7 +343,7 @@ public class VideoPreferencesCommon implements OnSharedPreferenceChangeListener 
     List<String> UiLanguageListEntryValues = new ArrayList<>();
 
     private final ActivityResultLauncher<Intent> mFolderPickerLauncher;
-    private final ActivityResultLauncher<Intent> mFontsFolderTreeLauncher;
+    private final ActivityResultLauncher<Intent> mFontsFolderPickerLauncher;
     private final ActivityResultLauncher<Intent> mTraktAuthLauncher;
 
     public VideoPreferencesCommon(PreferenceFragmentCompat preferencesFragment) {
@@ -351,9 +351,9 @@ public class VideoPreferencesCommon implements OnSharedPreferenceChangeListener 
         mFolderPickerLauncher = preferencesFragment.registerForActivityResult(
                 new ActivityResultContracts.StartActivityForResult(),
                 this::onFolderPickerResult);
-        mFontsFolderTreeLauncher = preferencesFragment.registerForActivityResult(
+        mFontsFolderPickerLauncher = preferencesFragment.registerForActivityResult(
                 new ActivityResultContracts.StartActivityForResult(),
-                this::onFontsFolderTreeResult);
+                this::onFontsFolderPickerResult);
         mTraktAuthLauncher = preferencesFragment.registerForActivityResult(
                 new ActivityResultContracts.StartActivityForResult(),
                 this::onTraktAuthResult);
@@ -375,95 +375,96 @@ public class VideoPreferencesCommon implements OnSharedPreferenceChangeListener 
         }
     }
 
-    // Handles the result of FontsFolderSafPreference's ACTION_OPEN_DOCUMENT_TREE launch.
-    // Separate from onFolderPickerResult() above both because it's a structurally different
-    // result shape (a content:// tree URI, not a plain path string) and because
-    // registerForActivityResult() callbacks are matched by request code under the hood --
-    // routing two different pickers through one shared callback isn't workable here anyway.
+    // Handles the result of FontsFolderPreference's FolderPicker launch. Separate from
+    // onFolderPickerResult() above because the two results feed different preferences.
     //
-    // Why SAF instead of the old FolderPicker-based flow: this app only holds the granular
-    // "Photos and videos" media permissions, not MANAGE_EXTERNAL_STORAGE. Under scoped
-    // storage, a plain filesystem folder listing only shows files the OS classifies as
-    // photo/video/audio, or files the app created -- confirmed by direct logcat testing that
-    // a .ttf placed in a folder doesn't appear even in the RAW unfiltered File.listFiles()
-    // result for that directory. ACTION_OPEN_DOCUMENT_TREE is a separate access path,
-    // unaffected by that media-only permission scope: the user grants access to one specific
-    // folder via the system Files app, and the resulting content:// tree URI can be
-    // persisted indefinitely via takePersistableUriPermission().
-    @SuppressLint("WrongConstant") // lint can't reduce Intent.getFlags() & (READ|WRITE) to @Intent.AccessUriMode, see https://developer.android.com/training/data-storage/shared/documents-files#persist-permissions
-    private void onFontsFolderTreeResult(ActivityResult result) {
+    // This used to be the system Storage Access Framework picker (ACTION_OPEN_DOCUMENT_TREE),
+    // which crashed on Android TV / Fire TV where no activity handles that intent. The
+    // embedded FolderPicker (also used for the torrent path) works the same on every device
+    // and with a remote, so it is now the only picker.
+    //
+    // Scoped-storage caveat: without MANAGE_EXTERNAL_STORAGE, a plain File listing of a shared
+    // folder may not show non-media files such as .ttf. That surfaces as "no fonts found"
+    // (see onFontsFolderSynced()) rather than a crash; the manageexternalstorage flavor, or a
+    // folder under the app's own storage, is unaffected.
+    private void onFontsFolderPickerResult(ActivityResult result) {
         if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) return;
-        Uri treeUri = result.getData().getData();
-        if (treeUri == null) return;
+        String newPath = result.getData().getStringExtra(FolderPicker.EXTRA_SELECTED_FOLDER);
+        if (newPath == null) return;
 
         Context context = getActivity();
         if (context == null) return;
 
-        // Persist the grant so it survives app restarts/reboots -- without this, the
-        // content:// URI stops being readable the next time the process starts, since SAF
-        // grants are otherwise scoped to the lifetime of this specific result callback.
-        try {
-            context.getContentResolver().takePersistableUriPermission(treeUri,
-                    result.getData().getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION));
-        } catch (SecurityException e) {
-            log.warn("onFontsFolderTreeResult: failed to persist URI permission for '{}': {}", treeUri, e.getMessage());
+        java.io.File dir = new java.io.File(newPath);
+        if (!dir.isDirectory()) {
+            log.warn("onFontsFolderPickerResult: '{}' is not a directory", newPath);
+            Toast.makeText(context, R.string.subtitle_fonts_folder_unreadable, Toast.LENGTH_LONG).show();
             return;
         }
 
         PreferenceManager.getDefaultSharedPreferences(context)
-                .edit().putString(KEY_SUBTITLE_FONTS_FOLDER_URI, treeUri.toString()).apply();
+                .edit().putString(KEY_SUBTITLE_FONTS_FOLDER_URI, dir.getAbsolutePath()).apply();
 
-        FontsFolderSafPreference pref =
-                (FontsFolderSafPreference) findPreference(KEY_SUBTITLE_FONTS_FOLDER_URI);
+        FontsFolderPreference pref =
+                (FontsFolderPreference) findPreference(KEY_SUBTITLE_FONTS_FOLDER_URI);
         if (pref != null) pref.notifyChanged();
 
-        // The actual copy-into-cache-dir work does file I/O (reads every font file via
-        // ContentResolver) -- must not run on the UI thread this callback fires on.
-        syncFontsFolderAndRefreshList(context, treeUri);
+        // Copying the fonts into the app's store dir does file I/O -- must not run on the UI
+        // thread this callback fires on.
+        syncFontsFolderAndRefreshList(context, dir.getAbsolutePath());
     }
 
     // Shared "given a sync/check result count, update prefs + refresh the ListPreference"
     // tail -- called from both entry points below (picker-result and Settings-reopened) so
     // this UI-thread bookkeeping isn't duplicated between them. Must be called on the UI
     // thread; both callers post to it via Handler(Looper.getMainLooper()) after their
-    // background-thread SubtitleFontsFolderSync call returns.
-    private void onFontsFolderSynced(Context context, Uri treeUri, int resultCount) {
+    // background-thread SubtitleFontsFolderSync call returns. `folder` is whatever is stored
+    // under KEY_SUBTITLE_FONTS_FOLDER_URI (a plain path, or a legacy SAF tree URI).
+    // `userPicked` is true only right after the user chose a folder: that is the one case
+    // where a toast explaining an empty/unreadable result is wanted, rather than on every
+    // reopening of Settings.
+    private void onFontsFolderSynced(Context context, String folder, int resultCount, boolean userPicked) {
         java.io.File storeDir = SubtitleFontsFolderSync.getFontsStoreDir(context);
         if (resultCount >= 0) {
-            // Only the store path (not the SAF URI) is what Player.java/native code
-            // ever reads -- see the KEY_SUBTITLE_FONTS_FOLDER comment at its
+            // Only the store path (not the user-facing folder) is what Player.java/native
+            // code ever reads -- see the KEY_SUBTITLE_FONTS_FOLDER comment at its
             // declaration above.
             PreferenceManager.getDefaultSharedPreferences(context)
                     .edit().putString(KEY_SUBTITLE_FONTS_FOLDER, storeDir.getAbsolutePath()).apply();
         } else {
-            log.warn("onFontsFolderSynced: sync failed for '{}', leaving previous store dir contents in place", treeUri);
+            log.warn("onFontsFolderSynced: sync failed for '{}', leaving previous store dir contents in place", folder);
+        }
+        if (userPicked && resultCount <= 0) {
+            Toast.makeText(context,
+                    resultCount < 0 ? R.string.subtitle_fonts_folder_unreadable : R.string.subtitle_fonts_folder_empty,
+                    Toast.LENGTH_LONG).show();
         }
         refreshSubtitleDefaultFontList(storeDir);
     }
 
-    // Entry point for the picker-result path (onFontsFolderTreeResult): a resync is always
+    // Entry point for the picker-result path (onFontsFolderPickerResult): a resync is always
     // needed here (the user just picked/changed the folder), so this goes straight to
-    // SubtitleFontsFolderSync.syncFromTree() on a background thread -- no signature check
+    // SubtitleFontsFolderSync.syncFromFolder() on a background thread -- no signature check
     // first, since we already know one would come back stale.
-    private void syncFontsFolderAndRefreshList(Context context, Uri treeUri) {
+    private void syncFontsFolderAndRefreshList(Context context, String folder) {
         new Thread(() -> {
-            int copied = SubtitleFontsFolderSync.syncFromTree(context, treeUri);
-            new Handler(Looper.getMainLooper()).post(() -> onFontsFolderSynced(context, treeUri, copied));
+            int copied = SubtitleFontsFolderSync.syncFromFolder(context, folder);
+            new Handler(Looper.getMainLooper()).post(() -> onFontsFolderSynced(context, folder, copied, true));
         }, "SubtitleFontsFolderSync").start();
     }
 
     // Entry point for the Settings-screen-(re)opened path (onCreatePreferences): unlike the
     // picker-result path above, here we don't yet know whether a resync is even needed.
-    // SubtitleFontsFolderSync.syncIfNeeded() does exactly ONE SAF query total to both decide
-    // AND (if needed) perform the resync, run on a background thread -- both the check
+    // SubtitleFontsFolderSync.syncFolderIfNeeded() compares the folder with the store dir and
+    // only recopies when they differ, on a background thread -- both the check
     // itself and, in the "already up to date" case, refreshSubtitleDefaultFontList() (which
     // calls the native FreeType-based FontNameParser.parse() once per cached font file) used
     // to run directly on the UI thread here, which was a real source of jank opening Settings
     // whenever a fonts folder was configured.
-    private void refreshFontsFolderAsync(Context context, Uri treeUri) {
+    private void refreshFontsFolderAsync(Context context, String folder) {
         new Thread(() -> {
-            int count = SubtitleFontsFolderSync.syncIfNeeded(context, treeUri);
-            new Handler(Looper.getMainLooper()).post(() -> onFontsFolderSynced(context, treeUri, count));
+            int count = SubtitleFontsFolderSync.syncFolderIfNeeded(context, folder);
+            new Handler(Looper.getMainLooper()).post(() -> onFontsFolderSynced(context, folder, count, false));
         }, "SubtitleFontsFolderCheck").start();
     }
 
@@ -871,22 +872,21 @@ public class VideoPreferencesCommon implements OnSharedPreferenceChangeListener 
                 (TorrentPathDialogPreference) findPreference(KEY_TORRENT_PATH);
         if (torrentPref != null) torrentPref.setFolderPickerLauncher(mFolderPickerLauncher);
 
-        FontsFolderSafPreference fontsFolderPref =
-                (FontsFolderSafPreference) findPreference(KEY_SUBTITLE_FONTS_FOLDER_URI);
+        FontsFolderPreference fontsFolderPref =
+                (FontsFolderPreference) findPreference(KEY_SUBTITLE_FONTS_FOLDER_URI);
         if (fontsFolderPref != null) {
-            fontsFolderPref.setTreePickerLauncher(mFontsFolderTreeLauncher);
-            String savedUriString = mSharedPreferences.getString(KEY_SUBTITLE_FONTS_FOLDER_URI, null);
-            if (savedUriString != null) {
-                Uri savedTreeUri = Uri.parse(savedUriString);
+            fontsFolderPref.setFolderPickerLauncher(mFontsFolderPickerLauncher);
+            String savedFolder = mSharedPreferences.getString(KEY_SUBTITLE_FONTS_FOLDER_URI, null);
+            if (savedFolder != null) {
                 Context context = getActivity();
-                // Re-sync opportunistically when the Settings screen is reopened: SAF trees
+                // Re-sync opportunistically when the Settings screen is reopened: the folder
                 // can change (fonts added/removed via a file manager) without this app ever
                 // being told, unlike a live filesystem watch. The whole check-and-maybe-sync
-                // (SubtitleFontsFolderSync.syncIfNeeded(), one SAF query total either way) and
-                // the list refresh run off the UI thread -- see refreshFontsFolderAsync()'s
-                // doc comment for why that's needed here.
+                // (SubtitleFontsFolderSync.syncFolderIfNeeded()) and the list refresh run off
+                // the UI thread -- see refreshFontsFolderAsync()'s doc comment for why that's
+                // needed here.
                 if (context != null) {
-                    refreshFontsFolderAsync(context, savedTreeUri);
+                    refreshFontsFolderAsync(context, savedFolder);
                 }
             }
         }

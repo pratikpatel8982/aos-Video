@@ -413,7 +413,7 @@
             android:title="@string/subtitle_use_margins_title"
             app:iconSpaceReserved="false"/>
 
-        <com.archos.mediacenter.video.utils.FontsFolderSafPreference
+        <com.archos.mediacenter.video.utils.FontsFolderPreference
             android:key="subtitle_fonts_folder_uri"
             android:summary="@string/subtitle_fonts_folder_summary"
             android:title="@string/subtitle_fonts_folder_title"

@@ -26,6 +26,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -37,10 +38,16 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Custom subtitle fonts folder (MX Player / mpv-android style third-party fonts dir),
- * implemented via the Storage Access Framework instead of a raw filesystem path.
+ * Custom subtitle fonts folder (MX Player / mpv-android style third-party fonts dir).
  *
- * WHY SAF AND NOT A PLAIN FOLDER PATH: this app only holds the granular "Photos and
+ * The folder is now picked with Nova's embedded FolderPicker on every device and stored as
+ * a plain filesystem path: see syncFromDir()/syncDirIfNeeded() below. The Storage Access
+ * Framework picker it replaced (ACTION_OPEN_DOCUMENT_TREE) does not exist on Android TV /
+ * Fire TV, where launching it crashed. The SAF code in this class is kept only so that a
+ * content:// tree URI saved by an earlier version keeps working until a new folder is
+ * picked; syncFromFolder()/syncFolderIfNeeded() dispatch between the two on the stored value.
+ *
+ * WHY SAF WAS USED BEFORE: this app only holds the granular "Photos and
  * videos" media permissions, not MANAGE_EXTERNAL_STORAGE. Under scoped storage, a plain
  * folder listing only shows files the OS classifies as photo/video/audio, so font files
  * in a shared folder wouldn't be visible. SAF's ACTION_OPEN_DOCUMENT_TREE grant is a
@@ -191,6 +198,25 @@ public class SubtitleFontsFolderSync {
         return sig;
     }
 
+    /** Empties `storeDir` (creating it if needed) so a fresh copy can be written into it.
+     * Returns false if the directory could not be created. */
+    private static boolean prepareStoreDir(File storeDir) {
+        if (storeDir.exists()) {
+            File[] stale = storeDir.listFiles();
+            if (stale != null) {
+                for (File f : stale) {
+                    if (!f.delete()) {
+                        log.warn("prepareStoreDir: failed to delete stale cached font '{}'", f.getAbsolutePath());
+                    }
+                }
+            }
+        } else if (!storeDir.mkdirs()) {
+            log.warn("prepareStoreDir: failed to create fonts store dir '{}'", storeDir.getAbsolutePath());
+            return false;
+        }
+        return true;
+    }
+
     /**
      * Copies every `docs` entry (already fetched by queryFontDocs() -- no further SAF
      * queries here) into `storeDir`, wiping it first. Deliberately NOT incremental/diffed
@@ -202,19 +228,7 @@ public class SubtitleFontsFolderSync {
      * to ContentResolver.openInputStream().
      */
     private static int copyToCache(Context context, Uri treeUri, List<FontDoc> docs, File storeDir) {
-        if (storeDir.exists()) {
-            File[] stale = storeDir.listFiles();
-            if (stale != null) {
-                for (File f : stale) {
-                    if (!f.delete()) {
-                        log.warn("copyToCache: failed to delete stale cached font '{}'", f.getAbsolutePath());
-                    }
-                }
-            }
-        } else if (!storeDir.mkdirs()) {
-            log.warn("copyToCache: failed to create fonts store dir '{}'", storeDir.getAbsolutePath());
-            return -1;
-        }
+        if (!prepareStoreDir(storeDir)) return -1;
 
         ContentResolver resolver = context.getContentResolver();
         int copied = 0;
@@ -301,6 +315,116 @@ public class SubtitleFontsFolderSync {
         }
 
         return copyToCache(context, treeUri, qr.docs, storeDir);
+    }
+
+    /** True if the value stored under KEY_SUBTITLE_FONTS_FOLDER_URI is a SAF tree URI saved
+     * by an earlier version, false for a plain filesystem path picked with FolderPicker. */
+    public static boolean isSafTreeUri(String folder) {
+        return folder != null && folder.startsWith("content://");
+    }
+
+    /**
+     * Direct children of `dir` that are font files, or null if `dir` is not a readable
+     * directory. null is deliberately distinct from an empty array (readable folder with no
+     * fonts), same contract as the SAF side's ok=false vs an empty list.
+     */
+    private static File[] listFontFiles(File dir) {
+        if (dir == null || !dir.isDirectory()) {
+            log.warn("listFontFiles: '{}' is not a directory", dir);
+            return null;
+        }
+        File[] all = dir.listFiles();
+        if (all == null) {
+            log.warn("listFontFiles: cannot list '{}' (permission?)", dir);
+            return null;
+        }
+        List<File> fonts = new ArrayList<>();
+        for (File f : all) {
+            if (f.isFile() && hasFontExtension(f.getName())) fonts.add(f);
+        }
+        return fonts.toArray(new File[0]);
+    }
+
+    /** Wipes the store dir and copies `fonts` into it. Each copy keeps the source's mtime so
+     * that signature() can recognise an unchanged folder in syncDirIfNeeded(). Returns the
+     * number of fonts copied, or -1 if the store dir could not be prepared. */
+    private static int copyFilesToStore(File[] fonts, File storeDir) {
+        if (!prepareStoreDir(storeDir)) return -1;
+
+        int copied = 0;
+        for (File src : fonts) {
+            File dest = new File(storeDir, src.getName());
+            boolean ok = false;
+            try (InputStream in = new FileInputStream(src);
+                 OutputStream out = new FileOutputStream(dest)) {
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                ok = true;
+            } catch (IOException e) {
+                log.warn("copyFilesToStore: failed to copy '{}': {}", src.getName(), e.getMessage());
+            }
+            if (ok) {
+                copied++;
+                // after the streams are closed, otherwise closing would bump the mtime again
+                if (!dest.setLastModified(src.lastModified())) {
+                    log.debug("copyFilesToStore: could not preserve mtime of '{}'", dest.getName());
+                }
+            } else {
+                dest.delete(); // do not leave a truncated font for native code to choke on
+            }
+        }
+        log.debug("copyFilesToStore: copied {} font file(s) into '{}'", copied, storeDir.getAbsolutePath());
+        return copied;
+    }
+
+    /**
+     * Unconditional sync from a plain folder picked with FolderPicker: copies every
+     * .ttf/.otf/.ttc directly under `srcDir` into the app's private fonts store dir,
+     * replacing what was there. Returns the number of fonts copied, or -1 if `srcDir`
+     * is not a readable directory -- distinct from a legitimate 0 (readable, no fonts, which
+     * is also what a scoped-storage-restricted folder can look like). Runs file I/O:
+     * dispatch to a background thread.
+     */
+    public static int syncFromDir(Context context, File srcDir) {
+        File[] fonts = listFontFiles(srcDir);
+        if (fonts == null) return -1;
+        return copyFilesToStore(fonts, getFontsStoreDir(context));
+    }
+
+    /**
+     * Plain-folder counterpart of {@link #syncIfNeeded(Context, Uri)}: only recopies when the
+     * folder's (count, summed mtime+size) differs from what is in the store dir. Returns the
+     * number of fonts now in the store dir, or -1 if `srcDir` is not a readable directory.
+     * Runs file I/O: dispatch to a background thread.
+     */
+    public static int syncDirIfNeeded(Context context, File srcDir) {
+        File[] fonts = listFontFiles(srcDir);
+        if (fonts == null) return -1;
+
+        File storeDir = getFontsStoreDir(context);
+        File[] cached = storeDir.listFiles();
+        int cachedCount = cached == null ? 0 : cached.length;
+        if (fonts.length == cachedCount && signature(fonts) == signature(cached)) {
+            log.debug("syncDirIfNeeded: '{}' unchanged since last sync ({} font(s)), skipping copy", srcDir, cachedCount);
+            return cachedCount;
+        }
+        return copyFilesToStore(fonts, storeDir);
+    }
+
+    /** Unconditional sync from whatever KEY_SUBTITLE_FONTS_FOLDER_URI holds: a plain path
+     * (current) or a legacy SAF tree URI. Same return contract as syncFromDir(). */
+    public static int syncFromFolder(Context context, String folder) {
+        if (folder == null) return -1;
+        if (isSafTreeUri(folder)) return syncFromTree(context, Uri.parse(folder));
+        return syncFromDir(context, new File(folder));
+    }
+
+    /** "Sync only if changed" variant of {@link #syncFromFolder(Context, String)}. */
+    public static int syncFolderIfNeeded(Context context, String folder) {
+        if (folder == null) return -1;
+        if (isSafTreeUri(folder)) return syncIfNeeded(context, Uri.parse(folder));
+        return syncDirIfNeeded(context, new File(folder));
     }
 
     /**
